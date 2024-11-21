@@ -11,7 +11,7 @@ jobs:
   build-image:
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true 
     runs-on: ubuntu-latest
-
+    environment: Devx
     steps:
       # Step 1: Checkout the code
       - name: Checkout repository
@@ -23,7 +23,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1  # Change region if needed
+          aws-region: ${{ secrets.AWS_REGION }} 
 
   
       - name: Setup `packer`
@@ -133,7 +133,88 @@ jobs:
             -var "subnet_id=${{ secrets.AWS_SUBNET_ID }}" \
             -var "vpc_id=${{ secrets.AWS_VPC_ID }}" \
             -var "demo_acc_id=${{ secrets.AWS_DEMO_ACC_ID }}" \
-            packer/packer.pkr.hcl
+            packer/packer.pkr.hcl | tee packer-output.log
+        
+      - name: Extract AMI ID
+        id: extract-ami
+        run: |
+          AMI_ID=$(grep -oP 'ami-\w+' packer-output.log | tail -1)
+          echo "AMI ID: $AMI_ID"
+          echo "LATEST_AMI_ID=$AMI_ID" >> $GITHUB_ENV
+
+      - name: Configure AWS Credentials (demo Account)
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.DEMO_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.DEMO_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }} 
+
+      # Step 4: Create a new Launch Template version with the AMI ID from Step 3
+      - name: Create new Launch Template version
+        run: |
+          aws ec2 create-launch-template-version \
+            --launch-template-name ${{ secrets.LAUNCH_TEMPLATE_NAME }} \
+            --source-version 1 \
+            --version-description "Updated with latest AMI" \
+            --launch-template-data "{\"ImageId\":\"${LATEST_AMI_ID}\"}"
+
+      - name: Get Latest Launch Template Version
+        id: fetch-latest-version
+        run: |
+          LATEST_VERSION=$(aws ec2 describe-launch-template-versions \
+            --launch-template-name ${{ secrets.LAUNCH_TEMPLATE_NAME }} \
+            --query "sort_by(LaunchTemplateVersions[?VersionDescription=='Updated with latest AMI'], &VersionNumber)[-1].VersionNumber" \
+            --output text)
+          echo "LATEST_VERSION=${LATEST_VERSION}" >> $GITHUB_ENV
+          echo "Latest Version: $LATEST_VERSION"
+      - name: Set Default Launch Template Version
+        run: |
+          aws ec2 modify-launch-template \
+            --launch-template-name ${{ secrets.LAUNCH_TEMPLATE_NAME }} \
+            --default-version $LATEST_VERSION
+
+
+      - name: Update Auto Scaling Group
+        run: |
+          aws autoscaling update-auto-scaling-group \
+            --auto-scaling-group-name ${{ secrets.AUTOSCALING_GROUP_NAME }} \
+            --launch-template "LaunchTemplateName=${{ secrets.LAUNCH_TEMPLATE_NAME }},Version=${LATEST_VERSION}"
+
+      # Step 6: Trigger Instance Refresh
+      - name: Trigger Instance Refresh
+        id: instance-refresh
+        run: |
+          REFRESH_ID=$(aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name ${{ secrets.AUTOSCALING_GROUP_NAME }} \
+            --preferences "{\"InstanceWarmup\":300,\"MinHealthyPercentage\":50}" \
+            --query "InstanceRefreshId" --output text)
+          echo "refresh_id=$REFRESH_ID" >> $GITHUB_ENV
+          echo "Refresh ID: $REFRESH_ID"
+
+
+      # Step 7: Wait for Instance Refresh to Complete
+      - name: Wait for Instance Refresh
+        run: |
+           while true; do
+            REFRESH_INFO=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name ${{ secrets.AUTOSCALING_GROUP_NAME }} \
+              --instance-refresh-ids $REFRESH_ID)
+            
+            STATUS=$(echo "$REFRESH_INFO" | jq -r '.InstanceRefreshes[0].Status')
+            PERCENTAGE=$(echo "$REFRESH_INFO" | jq -r '.InstanceRefreshes[0].PercentageComplete')
+            STATUS_REASON=$(echo "$REFRESH_INFO" | jq -r '.InstanceRefreshes[0].StatusReason // "No reason provided"')
+            
+            echo "Current status: $STATUS ($PERCENTAGE% complete)"
+            echo "Status reason: $STATUS_REASON"
+            if [ "$STATUS" == "Successful" ]; then
+              echo "Instance refresh completed successfully."
+              exit 0
+            elif [ "$STATUS" == "Failed" ]; then
+              echo "Instance refresh failed."
+              exit 1
+            fi
+            sleep 30
+           done
 
 
       

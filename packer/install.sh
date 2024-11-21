@@ -8,6 +8,41 @@ sudo apt install -y nodejs npm unzip
 wget https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
 sudo dpkg -i -E ./amazon-cloudwatch-agent.deb
 
+sudo mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+
+sudo bash -c 'cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<EOF
+{
+  "agent": {
+    "metrics_collection_interval": 60,
+    "logfile": "/opt/aws/amazon-cloudwatch-agent/logs/amazon-cloudwatch-agent.log"
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/syslog",
+            "log_group_name": "cloudwebapp-me-logs",
+            "log_stream_name": "{instance_id}-syslog",
+            "timezone": "UTC"
+          },
+          {
+            "file_path": "/home/csye6225/app/logs/app.log",
+            "log_group_name": "cloudwebapp-me-logs",
+            "log_stream_name": "{instance_id}-app-log",
+            "timezone": "UTC"
+          }
+        ]
+      }
+    }
+  }
+}
+EOF'
+
+# Set proper permissions
+sudo chmod 644 /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+sudo chown root:root /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
 sudo apt-get remove --purge -y git
 
 
@@ -15,6 +50,9 @@ sudo apt-get remove --purge -y git
 sudo useradd -r -s /usr/sbin/nologin -d /home/csye6225 csye6225
 sudo mkdir -p /home/csye6225/app 
 sudo chown -R csye6225:csye6225 /home/csye6225
+# Create log directory and set permissions
+sudo mkdir -p /home/csye6225/app/logs
+sudo chown -R csye6225:csye6225 /home/csye6225/app/logs
 
 
 # Copy the app artifacts to the app directory
@@ -67,3 +105,4 @@ sudo systemctl enable webapp.service
 
 #  start the service 
 sudo systemctl start webapp.service
+
